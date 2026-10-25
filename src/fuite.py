@@ -1,40 +1,51 @@
-﻿import pandas as pd
-import mlflow
+﻿import numpy as np
+import pandas as pd
+from flaml import AutoML
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
 
 df = pd.read_csv('data/transactions.csv')
 
-# Variable qui revele directement la cible
-df['fraude_confirmee'] = df['fraude']
+rng = np.random.default_rng(0)
+df['num_dossier_litige'] = np.where(
+    df['fraude'] == 1,
+    rng.integers(10000, 99999, len(df)),
+    0
+)
 
-mlflow.set_tracking_uri('http://127.0.0.1:5000')
-mlflow.set_experiment('tp4-automl')
+X, y = df.drop(columns='fraude'), df['fraude']
+Xtr, Xte, ytr, yte = train_test_split(
+    X, y, test_size=0.25, random_state=42
+)
 
-for scenario, colonnes in [
-    ('avec-fuite', ['montant', 'anciennete', 'freq_24h', 'nuit', 'fraude_confirmee']),
-    ('sans-fuite', ['montant', 'anciennete', 'freq_24h', 'nuit'])
-]:
-    X = df[colonnes]
-    y = df['fraude']
+a = AutoML()
+a.fit(
+    Xtr, ytr,
+    task='classification',
+    metric='f1',
+    time_budget=30,
+    seed=42,
+    verbose=0
+)
 
-    Xtr, Xte, ytr, yte = train_test_split(
-        X, y, test_size=0.25, random_state=42, stratify=y
+print('famille retenue :', a.best_estimator)
+
+modele = a.model.estimator
+if hasattr(modele, 'feature_importances_'):
+    imp = sorted(
+        zip(X.columns, modele.feature_importances_),
+        key=lambda t: -t[1]
     )
+    print('importance des variables :',
+          [(c, round(float(v), 3)) for c, v in imp])
 
-    modele = RandomForestClassifier(
-        n_estimators=500,
-        max_depth=16,
-        random_state=42
-    )
+print('F1 en test, avec la colonne piegee :',
+      round(f1_score(yte, a.predict(Xte)), 4))
 
-    modele.fit(Xtr, ytr)
-    f1 = f1_score(yte, modele.predict(Xte))
+Xprod = Xte.copy()
+Xprod['num_dossier_litige'] = 0
 
-    with mlflow.start_run(run_name=scenario):
-        mlflow.log_param('scenario', scenario)
-        mlflow.log_param('fuite', scenario == 'avec-fuite')
-        mlflow.log_metric('f1', round(f1, 4))
-
-    print(f'{scenario:12s} | F1 = {f1:.4f}')
+print('F1 en production (colonne vide) :',
+      round(f1_score(
+          yte, a.predict(Xprod), zero_division=0
+      ), 4))
